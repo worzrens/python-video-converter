@@ -10,8 +10,8 @@ Interactive Python CLI for converting movie files with `ffmpeg`.
 - Lets you choose the default audio track.
 - Lets you choose one subtitle track to embed, or skip subtitles.
 - Lets you choose the target output height, with `1080` as the default.
-- Shows an estimated conversion time before you confirm.
-- Displays live progress while ffmpeg is converting.
+- Shows an estimated conversion time before you confirm, starting from a 1.0x encode-speed baseline.
+- Displays live progress while ffmpeg is converting, with ETA updated from ffmpeg's reported speed.
 - Checks that all files in a folder have matching audio and subtitle track layouts.
 - Converts to `.mp4` using `ffmpeg`.
 - Preserves aspect ratio during resize.
@@ -63,3 +63,4 @@ Interactive Python CLI for converting movie files with `ffmpeg`.
 
 - The script currently scans only the top level of a folder.
 - Output name collisions are handled by appending a numeric suffix.
+- A 2-minute test clip lives in `tests/Severance.S01E01.1080.2min.mkv` for local smoke tests.
