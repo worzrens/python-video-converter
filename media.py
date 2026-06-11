@@ -81,6 +81,7 @@ def probe_media(path: Path) -> MediaInfo:
         ],
         capture_output=True,
         text=True,
+        encoding="utf-8",
         check=False,
     )
     if completed.returncode != 0:
@@ -104,6 +105,18 @@ def probe_media(path: Path) -> MediaInfo:
     )
 
 
+def _repair_metadata_text(value: str | None) -> str | None:
+    if value is None:
+        return None
+    cleaned = " ".join(value.split()).strip()
+    if not cleaned:
+        return None
+    try:
+        return cleaned.encode("cp1251").decode("utf-8")
+    except UnicodeError:
+        return cleaned
+
+
 def _parse_stream(stream: dict, stream_type: str) -> MediaStream:
     tags = stream.get("tags") or {}
     disposition = stream.get("disposition") or {}
@@ -111,8 +124,8 @@ def _parse_stream(stream: dict, stream_type: str) -> MediaStream:
         index=int(stream["index"]),
         stream_type=stream_type,
         codec_name=stream.get("codec_name"),
-        language=tags.get("language"),
-        title=tags.get("title"),
+        language=_repair_metadata_text(tags.get("language")),
+        title=_repair_metadata_text(tags.get("title")),
         default=bool(disposition.get("default")),
     )
 

@@ -61,6 +61,35 @@ class ProbeMediaTests(unittest.TestCase):
         run.assert_called_once()
 
 
+    def test_probe_media_repairs_cyrillic_mojibake_titles(self):
+        payload = {
+            "format": {"format_name": "matroska,webm", "size": "123456", "duration": "12.5"},
+            "streams": [
+                {
+                    "index": 0,
+                    "codec_type": "audio",
+                    "codec_name": "aac",
+                    "tags": {"language": "rus", "title": "РќРµРІР°С„РёР»СЊРј"},
+                    "disposition": {"default": 1},
+                },
+                {
+                    "index": 1,
+                    "codec_type": "subtitle",
+                    "codec_name": "subrip",
+                    "tags": {"language": "rus", "title": "РќРµРІР°С„РёР»СЊРј"},
+                    "disposition": {"default": 0},
+                },
+            ],
+        }
+
+        completed = type("Completed", (), {"returncode": 0, "stdout": json.dumps(payload), "stderr": ""})()
+        with patch("subprocess.run", return_value=completed):
+            info = media.probe_media(Path("/tmp/movie.mkv"))
+
+        self.assertEqual(info.audio_streams[0].title, "Невафильм")
+        self.assertEqual(info.subtitle_streams[0].title, "Невафильм")
+        self.assertEqual(info.audio_streams[0].language, "rus")
+
 
 class PathAndNamingTests(unittest.TestCase):
     def test_output_path_for_single_file_uses_resolution_suffix(self):
