@@ -1,3 +1,5 @@
+"""Progress parsing, smoothing, formatting, and terminal rendering helpers."""
+
 from __future__ import annotations
 
 import os

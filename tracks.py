@@ -1,3 +1,5 @@
+"""Audio and subtitle track selection helpers for single-file and folder mode."""
+
 from __future__ import annotations
 
 from media import MediaInfo, MediaStream

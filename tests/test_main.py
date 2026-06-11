@@ -3,10 +3,14 @@ import json
 import os
 import tempfile
 import unittest
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
-import main
+import conversion
+import media
+import progress
+import tracks
 
 
 class ProbeMediaTests(unittest.TestCase):
@@ -41,7 +45,7 @@ class ProbeMediaTests(unittest.TestCase):
 
         completed = type("Completed", (), {"returncode": 0, "stdout": json.dumps(payload), "stderr": ""})()
         with patch("subprocess.run", return_value=completed) as run:
-            info = main.probe_media(Path("/tmp/movie.mkv"))
+            info = media.probe_media(Path("/tmp/movie.mkv"))
 
         self.assertEqual(info.format_name, "matroska,webm")
         self.assertEqual(info.duration_seconds, 12.5)
@@ -56,7 +60,7 @@ class ProbeMediaTests(unittest.TestCase):
 
 class PathAndNamingTests(unittest.TestCase):
     def test_output_path_for_single_file_uses_resolution_suffix(self):
-        result = main.build_output_path(
+        result = media.build_output_path(
             Path("/movies/film.avi"),
             is_folder_mode=False,
             output_root=None,
@@ -65,7 +69,7 @@ class PathAndNamingTests(unittest.TestCase):
         self.assertEqual(result, Path("/movies/film_1920x1080.mp4"))
 
     def test_output_path_for_folder_mode_uses_sibling_directory(self):
-        result = main.build_output_path(
+        result = media.build_output_path(
             Path("/movies/film.avi"),
             is_folder_mode=True,
             output_root=Path("/movies/collection-COMPRESSED"),
@@ -79,7 +83,7 @@ class AssetProbeTests(unittest.TestCase):
         asset = Path(__file__).with_name("Severance.S01E01.1080.2min.mkv")
         self.assertTrue(asset.exists())
 
-        info = main.probe_media(asset)
+        info = media.probe_media(asset)
         self.assertEqual(info.width, 1920)
         self.assertEqual(info.height, 1080)
         self.assertGreaterEqual(info.duration_seconds or 0, 119.0)
@@ -87,9 +91,9 @@ class AssetProbeTests(unittest.TestCase):
 
     def test_folder_summary_can_omit_tracks(self):
         asset = Path(__file__).with_name("Severance.S01E01.1080.2min.mkv")
-        info = main.probe_media(asset)
+        info = media.probe_media(asset)
 
-        summary = main.format_media_summary(info, include_tracks=False)
+        summary = media.format_media_summary(info, include_tracks=False)
         self.assertIn("File:", summary)
         self.assertIn("Format:", summary)
         self.assertNotIn("Audio tracks:", summary)
@@ -99,7 +103,7 @@ class AssetProbeTests(unittest.TestCase):
         asset = Path(__file__).with_name("Severance.S01E01.1080.2min_copy.mkv")
         self.assertTrue(asset.exists())
 
-        info = main.probe_media(asset)
+        info = media.probe_media(asset)
         self.assertEqual(info.audio_streams[0].title, "DTS-HD MA 5.1")
         self.assertEqual(info.subtitle_streams[0].title, "SDH")
         self.assertTrue(info.audio_streams[0].default)
@@ -109,14 +113,14 @@ class AssetProbeTests(unittest.TestCase):
         base_asset = Path(__file__).with_name("Severance.S01E01.1080.2min.mkv")
         copy_asset = Path(__file__).with_name("Severance.S01E01.1080.2min_copy.mkv")
 
-        base = main.probe_media(base_asset)
-        copy = main.probe_media(copy_asset)
+        base = media.probe_media(base_asset)
+        copy = media.probe_media(copy_asset)
 
         with patch("builtins.input", side_effect=["", "1"]):
-            audio_positions = main.resolve_folder_stream_positions([base, copy], "audio_streams", "audio", consistent=False)
+            audio_positions = tracks.resolve_folder_stream_positions([base, copy], "audio_streams", "audio", consistent=False)
 
         with patch("builtins.input", side_effect=["", "1"]):
-            subtitle_positions = main.resolve_folder_stream_positions([base, copy], "subtitle_streams", "subtitle", consistent=False, allow_none=True)
+            subtitle_positions = tracks.resolve_folder_stream_positions([base, copy], "subtitle_streams", "subtitle", consistent=False, allow_none=True)
 
         self.assertEqual(audio_positions, [0, 6])
         self.assertEqual(subtitle_positions, [0, 3])
@@ -125,8 +129,8 @@ class AssetProbeTests(unittest.TestCase):
         base_asset = Path(__file__).with_name("Severance.S01E01.1080.2min.mkv")
         copy_asset = Path(__file__).with_name("Severance.S01E01.1080.2min_copy.mkv")
 
-        base = main.probe_media(base_asset)
-        copy = main.probe_media(copy_asset)
+        base = media.probe_media(base_asset)
+        copy = media.probe_media(copy_asset)
 
         fake_stdout = io.StringIO()
         responses = iter(["2", "1", "2"])
@@ -135,8 +139,8 @@ class AssetProbeTests(unittest.TestCase):
             print(prompt, end="")
             return next(responses)
 
-        with patch("builtins.input", new=fake_input), patch.object(main.sys, "stdout", new=fake_stdout):
-            positions = main.resolve_folder_stream_positions([base, copy], "subtitle_streams", "subtitle", consistent=False, allow_none=True)
+        with patch("builtins.input", new=fake_input), patch.object(sys, "stdout", new=fake_stdout):
+            positions = tracks.resolve_folder_stream_positions([base, copy], "subtitle_streams", "subtitle", consistent=False, allow_none=True)
 
         output = fake_stdout.getvalue()
         self.assertEqual(positions, [0, 1])
@@ -149,44 +153,44 @@ class AssetProbeTests(unittest.TestCase):
 class ConsistencyAndCommandTests(unittest.TestCase):
     def test_prompt_yes_no_defaults_to_yes_on_blank(self):
         with patch("builtins.input", side_effect=[""]):
-            self.assertTrue(main.prompt_yes_no("Proceed with conversion?", default=True))
+            self.assertTrue(tracks.prompt_yes_no("Proceed with conversion?", default=True))
 
     def test_format_seconds_and_estimate_total_duration(self):
-        self.assertEqual(main.format_seconds(None), "unknown")
-        self.assertEqual(main.format_seconds(65), "01:05")
-        self.assertAlmostEqual(main.parse_frame_rate("24000/1001") or 0.0, 24000 / 1001, places=3)
-        self.assertEqual(main.parse_frame_rate("30"), 30.0)
-        self.assertIsNone(main.parse_frame_rate("0/0"))
-        self.assertIsNone(main.parse_frame_rate("N/A"))
-        self.assertEqual(main.parse_progress_time("2500000"), 2.5)
-        self.assertEqual(main.parse_progress_time("00:00:02.50"), 2.5)
+        self.assertEqual(progress.format_seconds(None), "unknown")
+        self.assertEqual(progress.format_seconds(65), "01:05")
+        self.assertAlmostEqual(media.parse_frame_rate("24000/1001") or 0.0, 24000 / 1001, places=3)
+        self.assertEqual(media.parse_frame_rate("30"), 30.0)
+        self.assertIsNone(media.parse_frame_rate("0/0"))
+        self.assertIsNone(media.parse_frame_rate("N/A"))
+        self.assertEqual(progress.parse_progress_time("2500000"), 2.5)
+        self.assertEqual(progress.parse_progress_time("00:00:02.50"), 2.5)
         self.assertEqual(
-            main.parse_progress_time("2500", key="out_time_ms", total_duration=120.0, current_seconds=2.0),
+            progress.parse_progress_time("2500", key="out_time_ms", total_duration=120.0, current_seconds=2.0),
             2.5,
         )
         self.assertEqual(
-            main.parse_progress_time("2500000", key="out_time_ms", total_duration=120.0, current_seconds=2.0),
+            progress.parse_progress_time("2500000", key="out_time_ms", total_duration=120.0, current_seconds=2.0),
             2.5,
         )
-        self.assertEqual(main.parse_progress_time("2500000", key="out_time_us"), 2.5)
-        self.assertIsNone(main.parse_progress_time("N/A"))
-        self.assertEqual(main.parse_progress_speed("1.5x"), 1.5)
-        self.assertEqual(main.parse_progress_speed(" 1.5x"), 1.5)
-        self.assertIsNone(main.parse_progress_speed("N/A"))
-        self.assertAlmostEqual(main.smooth_metric(2.0, 4.0, 0.25) or 0.0, 2.5)
-        self.assertEqual(main.smooth_metric(None, 3.0, 0.25), 3.0)
-        self.assertEqual(main.clamp_relative_change(2.0, 4.0, max_change_ratio=0.25), 2.5)
-        self.assertEqual(main.clamp_relative_change(2.0, 1.0, max_change_ratio=0.25), 1.5)
+        self.assertEqual(progress.parse_progress_time("2500000", key="out_time_us"), 2.5)
+        self.assertIsNone(progress.parse_progress_time("N/A"))
+        self.assertEqual(progress.parse_progress_speed("1.5x"), 1.5)
+        self.assertEqual(progress.parse_progress_speed(" 1.5x"), 1.5)
+        self.assertIsNone(progress.parse_progress_speed("N/A"))
+        self.assertAlmostEqual(progress.smooth_metric(2.0, 4.0, 0.25) or 0.0, 2.5)
+        self.assertEqual(progress.smooth_metric(None, 3.0, 0.25), 3.0)
+        self.assertEqual(progress.clamp_relative_change(2.0, 4.0, max_change_ratio=0.25), 2.5)
+        self.assertEqual(progress.clamp_relative_change(2.0, 1.0, max_change_ratio=0.25), 1.5)
 
         infos = [
-            main.MediaInfo(Path("a.mkv"), "matroska", 10.0, 1, 1, 1, [], []),
-            main.MediaInfo(Path("b.mkv"), "matroska", 20.0, 1, 1, 1, [], []),
+            media.MediaInfo(Path("a.mkv"), "matroska", 10.0, 1, 1, 1, [], []),
+            media.MediaInfo(Path("b.mkv"), "matroska", 20.0, 1, 1, 1, [], []),
         ]
-        self.assertEqual(main.estimate_total_duration(infos), 30.0)
-        self.assertEqual(main.estimate_conversion_time(30.0, 2.0), 15.0)
+        self.assertEqual(progress.estimate_total_duration(infos), 30.0)
+        self.assertEqual(progress.estimate_conversion_time(30.0, 2.0), 15.0)
 
     def test_format_batch_progress_line_shows_global_progress(self):
-        line = main.format_batch_progress_line(
+        line = progress.format_batch_progress_line(
             completed_seconds=120.0,
             total_seconds=300.0,
             completed_files=0,
@@ -204,12 +208,12 @@ class ConsistencyAndCommandTests(unittest.TestCase):
 
     def test_choose_stream_position_does_not_repeat_track_list(self):
         streams = [
-            main.MediaStream(1, "audio", "aac", "eng", "Stereo", True),
-            main.MediaStream(2, "audio", "aac", "jpn", "Japanese", False),
+            media.MediaStream(1, "audio", "aac", "eng", "Stereo", True),
+            media.MediaStream(2, "audio", "aac", "jpn", "Japanese", False),
         ]
 
-        with patch("builtins.input", side_effect=["1"]), patch.object(main.sys, "stdout", new=io.StringIO()) as fake_stdout:
-            self.assertEqual(main.choose_stream_position(streams, "audio"), 0)
+        with patch("builtins.input", side_effect=["1"]), patch.object(sys, "stdout", new=io.StringIO()) as fake_stdout:
+            self.assertEqual(tracks.choose_stream_position(streams, "audio"), 0)
 
         output = fake_stdout.getvalue()
         self.assertNotIn("Available audio tracks", output)
@@ -217,14 +221,14 @@ class ConsistencyAndCommandTests(unittest.TestCase):
 
     def test_prompt_target_height_defaults_when_blank(self):
         with patch("builtins.input", side_effect=[""]):
-            self.assertEqual(main.prompt_target_height(), 1080)
+            self.assertEqual(tracks.prompt_target_height(), 1080)
 
     def test_prompt_target_height_accepts_custom_value(self):
         with patch("builtins.input", side_effect=["720"]):
-            self.assertEqual(main.prompt_target_height(), 720)
+            self.assertEqual(tracks.prompt_target_height(), 720)
 
     def test_calculate_target_width_only_downscales_above_target_height(self):
-        small = main.MediaInfo(
+        small = media.MediaInfo(
             path=Path("small.mkv"),
             format_name="matroska",
             duration_seconds=10.0,
@@ -234,7 +238,7 @@ class ConsistencyAndCommandTests(unittest.TestCase):
             audio_streams=[],
             subtitle_streams=[],
         )
-        large = main.MediaInfo(
+        large = media.MediaInfo(
             path=Path("large.mkv"),
             format_name="matroska",
             duration_seconds=20.0,
@@ -245,38 +249,38 @@ class ConsistencyAndCommandTests(unittest.TestCase):
             subtitle_streams=[],
         )
 
-        self.assertIsNone(main.calculate_target_width(small, 1080))
-        self.assertEqual(main.calculate_target_width(large, 1080), 1920)
-        self.assertEqual(main.calculate_target_width(large, 720), 1280)
+        self.assertIsNone(media.calculate_target_width(small, 1080))
+        self.assertEqual(media.calculate_target_width(large, 1080), 1920)
+        self.assertEqual(media.calculate_target_width(large, 720), 1280)
 
     def test_validate_folder_consistency_reports_audio_and_subtitle_independently(self):
-        first = main.MediaInfo(
+        first = media.MediaInfo(
             path=Path("one.mkv"),
             format_name="matroska",
             duration_seconds=10.0,
             size_bytes=1,
             width=1920,
             height=1080,
-            audio_streams=[main.MediaStream(1, "audio", "aac", "eng", "Stereo", True)],
-            subtitle_streams=[main.MediaStream(2, "subtitle", "subrip", "eng", "English", False)],
+            audio_streams=[media.MediaStream(1, "audio", "aac", "eng", "Stereo", True)],
+            subtitle_streams=[media.MediaStream(2, "subtitle", "subrip", "eng", "English", False)],
         )
-        second = main.MediaInfo(
+        second = media.MediaInfo(
             path=Path("two.mkv"),
             format_name="matroska",
             duration_seconds=10.0,
             size_bytes=1,
             width=1920,
             height=1080,
-            audio_streams=[main.MediaStream(1, "audio", "ac3", "eng", "Stereo", True)],
-            subtitle_streams=[main.MediaStream(2, "subtitle", "subrip", "eng", "English", False)],
+            audio_streams=[media.MediaStream(1, "audio", "ac3", "eng", "Stereo", True)],
+            subtitle_streams=[media.MediaStream(2, "subtitle", "subrip", "eng", "English", False)],
         )
 
-        audio_consistent, subtitle_consistent = main.validate_folder_consistency([first, second])
+        audio_consistent, subtitle_consistent = tracks.validate_folder_consistency([first, second])
         self.assertFalse(audio_consistent)
         self.assertTrue(subtitle_consistent)
 
     def test_resolve_folder_stream_positions_can_use_common_tracks(self):
-        first = main.MediaInfo(
+        first = media.MediaInfo(
             path=Path("one.mkv"),
             format_name="matroska",
             duration_seconds=10.0,
@@ -284,12 +288,12 @@ class ConsistencyAndCommandTests(unittest.TestCase):
             width=1920,
             height=1080,
             audio_streams=[
-                main.MediaStream(1, "audio", "aac", "eng", "Stereo", True),
-                main.MediaStream(2, "audio", "aac", "jpn", "Japanese", False),
+                media.MediaStream(1, "audio", "aac", "eng", "Stereo", True),
+                media.MediaStream(2, "audio", "aac", "jpn", "Japanese", False),
             ],
             subtitle_streams=[],
         )
-        second = main.MediaInfo(
+        second = media.MediaInfo(
             path=Path("two.mkv"),
             format_name="matroska",
             duration_seconds=10.0,
@@ -297,19 +301,19 @@ class ConsistencyAndCommandTests(unittest.TestCase):
             width=1920,
             height=1080,
             audio_streams=[
-                main.MediaStream(2, "audio", "aac", "jpn", "Japanese", False),
-                main.MediaStream(1, "audio", "aac", "eng", "Stereo", True),
+                media.MediaStream(2, "audio", "aac", "jpn", "Japanese", False),
+                media.MediaStream(1, "audio", "aac", "eng", "Stereo", True),
             ],
             subtitle_streams=[],
         )
 
         with patch("builtins.input", side_effect=["", "1"]):
-            positions = main.resolve_folder_stream_positions([first, second], "audio_streams", "audio", consistent=False)
+            positions = tracks.resolve_folder_stream_positions([first, second], "audio_streams", "audio", consistent=False)
 
         self.assertEqual(positions, [0, 1])
 
     def test_resolve_folder_stream_positions_can_select_each_file_separately(self):
-        first = main.MediaInfo(
+        first = media.MediaInfo(
             path=Path("one.mkv"),
             format_name="matroska",
             duration_seconds=10.0,
@@ -318,11 +322,11 @@ class ConsistencyAndCommandTests(unittest.TestCase):
             height=1080,
             audio_streams=[],
             subtitle_streams=[
-                main.MediaStream(1, "subtitle", "subrip", "eng", "English", False),
-                main.MediaStream(2, "subtitle", "subrip", "jpn", "Japanese", False),
+                media.MediaStream(1, "subtitle", "subrip", "eng", "English", False),
+                media.MediaStream(2, "subtitle", "subrip", "jpn", "Japanese", False),
             ],
         )
-        second = main.MediaInfo(
+        second = media.MediaInfo(
             path=Path("two.mkv"),
             format_name="matroska",
             duration_seconds=10.0,
@@ -331,18 +335,18 @@ class ConsistencyAndCommandTests(unittest.TestCase):
             height=1080,
             audio_streams=[],
             subtitle_streams=[
-                main.MediaStream(2, "subtitle", "subrip", "jpn", "Japanese", False),
-                main.MediaStream(1, "subtitle", "subrip", "eng", "English", False),
+                media.MediaStream(2, "subtitle", "subrip", "jpn", "Japanese", False),
+                media.MediaStream(1, "subtitle", "subrip", "eng", "English", False),
             ],
         )
 
         with patch("builtins.input", side_effect=["2", "2", "1"]):
-            positions = main.resolve_folder_stream_positions([first, second], "subtitle_streams", "subtitle", consistent=False, allow_none=True)
+            positions = tracks.resolve_folder_stream_positions([first, second], "subtitle_streams", "subtitle", consistent=False, allow_none=True)
 
         self.assertEqual(positions, [1, 0])
 
     def test_build_ffmpeg_command_sets_scale_and_default_tracks(self):
-        info = main.MediaInfo(
+        info = media.MediaInfo(
             path=Path("movie.mkv"),
             format_name="matroska",
             duration_seconds=30.0,
@@ -350,12 +354,12 @@ class ConsistencyAndCommandTests(unittest.TestCase):
             width=3840,
             height=2160,
             audio_streams=[
-                main.MediaStream(1, "audio", "aac", "eng", "Stereo", True),
-                main.MediaStream(2, "audio", "aac", "jpn", "Japanese", False),
+                media.MediaStream(1, "audio", "aac", "eng", "Stereo", True),
+                media.MediaStream(2, "audio", "aac", "jpn", "Japanese", False),
             ],
-            subtitle_streams=[main.MediaStream(3, "subtitle", "subrip", "eng", "English", False)],
+            subtitle_streams=[media.MediaStream(3, "subtitle", "subrip", "eng", "English", False)],
         )
-        command = main.build_ffmpeg_command(
+        command = conversion.build_ffmpeg_command(
             source=Path("movie.mkv"),
             output=Path("movie-COMPRESSED.mp4"),
             media=info,
@@ -374,17 +378,17 @@ class ConsistencyAndCommandTests(unittest.TestCase):
         self.assertIn("-stats_period", joined)
 
     def test_build_ffmpeg_command_skips_scaling_for_1080p_or_lower(self):
-        info = main.MediaInfo(
+        info = media.MediaInfo(
             path=Path("movie.mkv"),
             format_name="matroska",
             duration_seconds=30.0,
             size_bytes=1,
             width=640,
             height=480,
-            audio_streams=[main.MediaStream(1, "audio", "aac", "eng", "Stereo", True)],
+            audio_streams=[media.MediaStream(1, "audio", "aac", "eng", "Stereo", True)],
             subtitle_streams=[],
         )
-        command = main.build_ffmpeg_command(
+        command = conversion.build_ffmpeg_command(
             source=Path("movie.mkv"),
             output=Path("movie-COMPRESSED.mp4"),
             media=info,
@@ -396,17 +400,17 @@ class ConsistencyAndCommandTests(unittest.TestCase):
         self.assertNotIn("-vf", command)
 
     def test_build_ffmpeg_command_uses_copy_when_source_is_already_low_res_and_streams_are_compatible(self):
-        info = main.MediaInfo(
+        info = media.MediaInfo(
             path=Path("movie.mkv"),
             format_name="matroska",
             duration_seconds=30.0,
             size_bytes=1,
             width=1280,
             height=720,
-            audio_streams=[main.MediaStream(1, "audio", "aac", "eng", "Stereo", True)],
-            subtitle_streams=[main.MediaStream(2, "subtitle", "subrip", "eng", "English", False)],
+            audio_streams=[media.MediaStream(1, "audio", "aac", "eng", "Stereo", True)],
+            subtitle_streams=[media.MediaStream(2, "subtitle", "subrip", "eng", "English", False)],
         )
-        command = main.build_ffmpeg_command(
+        command = conversion.build_ffmpeg_command(
             source=Path("movie.mkv"),
             output=Path("movie-COMPRESSED.mp4"),
             media=info,
@@ -421,17 +425,17 @@ class ConsistencyAndCommandTests(unittest.TestCase):
         self.assertNotIn("-vf", joined)
 
     def test_build_ffmpeg_command_uses_custom_target_height(self):
-        info = main.MediaInfo(
+        info = media.MediaInfo(
             path=Path("movie.mkv"),
             format_name="matroska",
             duration_seconds=30.0,
             size_bytes=1,
             width=3840,
             height=2160,
-            audio_streams=[main.MediaStream(1, "audio", "aac", "eng", "Stereo", True)],
+            audio_streams=[media.MediaStream(1, "audio", "aac", "eng", "Stereo", True)],
             subtitle_streams=[],
         )
-        command = main.build_ffmpeg_command(
+        command = conversion.build_ffmpeg_command(
             source=Path("movie.mkv"),
             output=Path("movie-COMPRESSED.mp4"),
             media=info,
@@ -443,19 +447,19 @@ class ConsistencyAndCommandTests(unittest.TestCase):
         self.assertIn("scale=1280:720", " ".join(command))
 
     def test_build_ffmpeg_command_rejects_bitmap_subtitles(self):
-        info = main.MediaInfo(
+        info = media.MediaInfo(
             path=Path("movie.mkv"),
             format_name="matroska",
             duration_seconds=30.0,
             size_bytes=1,
             width=3840,
             height=2160,
-            audio_streams=[main.MediaStream(1, "audio", "aac", "eng", "Stereo", True)],
-            subtitle_streams=[main.MediaStream(2, "subtitle", "hdmv_pgs_subtitle", "eng", "PGS", False)],
+            audio_streams=[media.MediaStream(1, "audio", "aac", "eng", "Stereo", True)],
+            subtitle_streams=[media.MediaStream(2, "subtitle", "hdmv_pgs_subtitle", "eng", "PGS", False)],
         )
 
         with self.assertRaises(ValueError):
-            main.build_ffmpeg_command(
+            conversion.build_ffmpeg_command(
                 source=Path("movie.mkv"),
                 output=Path("movie-COMPRESSED.mp4"),
                 media=info,
@@ -465,14 +469,14 @@ class ConsistencyAndCommandTests(unittest.TestCase):
             )
 
     def test_convert_file_writes_batch_progress_output(self):
-        info = main.MediaInfo(
+        info = media.MediaInfo(
             path=Path("movie.mkv"),
             format_name="matroska",
             duration_seconds=20.0,
             size_bytes=1,
             width=3840,
             height=2160,
-            audio_streams=[main.MediaStream(1, "audio", "aac", "eng", "Stereo", True)],
+            audio_streams=[media.MediaStream(1, "audio", "aac", "eng", "Stereo", True)],
             subtitle_streams=[],
         )
 
@@ -485,15 +489,15 @@ class ConsistencyAndCommandTests(unittest.TestCase):
             def wait(self):
                 return 0
 
-        with patch("subprocess.Popen", return_value=FakeProcess()), patch.object(main.sys, "stdout", new=io.StringIO()) as fake_stdout:
-            main.convert_file(
+        with patch("subprocess.Popen", return_value=FakeProcess()), patch.object(sys, "stdout", new=io.StringIO()) as fake_stdout:
+            conversion.convert_file(
                 source=Path("movie.mkv"),
                 output=Path("movie-COMPRESSED.mp4"),
                 media=info,
                 audio_position=0,
                 subtitle_position=None,
                 target_height=1080,
-                batch_progress=main.BatchProgressState(total_files=2, completed_files=1, total_seconds=40.0, completed_seconds=10.0),
+                batch_progress=progress.BatchProgressState(total_files=2, completed_files=1, total_seconds=40.0, completed_seconds=10.0),
                 current_file_number=1,
             )
 
@@ -504,14 +508,14 @@ class ConsistencyAndCommandTests(unittest.TestCase):
         self.assertIn("speed 2.00x", output)
 
     def test_convert_file_does_not_finish_shared_batch_renderer(self):
-        info = main.MediaInfo(
+        info = media.MediaInfo(
             path=Path("movie.mkv"),
             format_name="matroska",
             duration_seconds=20.0,
             size_bytes=1,
             width=3840,
             height=2160,
-            audio_streams=[main.MediaStream(1, "audio", "aac", "eng", "Stereo", True)],
+            audio_streams=[media.MediaStream(1, "audio", "aac", "eng", "Stereo", True)],
             subtitle_streams=[],
         )
 
@@ -538,15 +542,15 @@ class ConsistencyAndCommandTests(unittest.TestCase):
                 self.finish_calls += 1
 
         renderer = SpyRenderer()
-        with patch("subprocess.Popen", return_value=FakeProcess()), patch("main.time.monotonic", side_effect=[0.0, 0.25, 0.5, 0.75, 1.0]):
-            main.convert_file(
+        with patch("subprocess.Popen", return_value=FakeProcess()), patch("conversion.time.monotonic", side_effect=[0.0, 0.25, 0.5, 0.75, 1.0]):
+            conversion.convert_file(
                 source=Path("movie.mkv"),
                 output=Path("movie-COMPRESSED.mp4"),
                 media=info,
                 audio_position=0,
                 subtitle_position=None,
                 target_height=1080,
-                batch_progress=main.BatchProgressState(total_files=2, completed_files=0, total_seconds=40.0, completed_seconds=0.0),
+                batch_progress=progress.BatchProgressState(total_files=2, completed_files=0, total_seconds=40.0, completed_seconds=0.0),
                 renderer=renderer,
                 current_file_number=1,
             )
@@ -555,14 +559,14 @@ class ConsistencyAndCommandTests(unittest.TestCase):
         self.assertEqual(renderer.finish_calls, 0)
 
     def test_convert_file_uses_line_buffered_progress_stream(self):
-        info = main.MediaInfo(
+        info = media.MediaInfo(
             path=Path("movie.mkv"),
             format_name="matroska",
             duration_seconds=20.0,
             size_bytes=1,
             width=3840,
             height=2160,
-            audio_streams=[main.MediaStream(1, "audio", "aac", "eng", "Stereo", True)],
+            audio_streams=[media.MediaStream(1, "audio", "aac", "eng", "Stereo", True)],
             subtitle_streams=[],
         )
 
@@ -574,7 +578,7 @@ class ConsistencyAndCommandTests(unittest.TestCase):
                 return 0
 
         with patch("subprocess.Popen", return_value=FakeProcess()) as popen:
-            main.convert_file(
+            conversion.convert_file(
                 source=Path("movie.mkv"),
                 output=Path("movie-COMPRESSED.mp4"),
                 media=info,
@@ -587,25 +591,25 @@ class ConsistencyAndCommandTests(unittest.TestCase):
 
     def test_progress_renderer_defaults_to_interactive_without_plain_env(self):
         with patch.dict(os.environ, {}, clear=True):
-            renderer = main.ProgressRenderer()
+            renderer = progress.ProgressRenderer()
 
         self.assertTrue(renderer.interactive)
 
     def test_progress_renderer_can_be_forced_to_plain_mode_by_env(self):
         with patch.dict(os.environ, {"FFCONV_PLAIN_PROGRESS": "1"}, clear=True):
-            renderer = main.ProgressRenderer()
+            renderer = progress.ProgressRenderer()
 
         self.assertFalse(renderer.interactive)
 
     def test_convert_file_writes_incremental_lines_in_non_interactive_mode(self):
-        info = main.MediaInfo(
+        info = media.MediaInfo(
             path=Path("movie.mkv"),
             format_name="matroska",
             duration_seconds=20.0,
             size_bytes=1,
             width=3840,
             height=2160,
-            audio_streams=[main.MediaStream(1, "audio", "aac", "eng", "Stereo", True)],
+            audio_streams=[media.MediaStream(1, "audio", "aac", "eng", "Stereo", True)],
             subtitle_streams=[],
         )
 
@@ -629,15 +633,15 @@ class ConsistencyAndCommandTests(unittest.TestCase):
                 return False
 
         fake_stdout = FakeStdout()
-        with patch("subprocess.Popen", return_value=FakeProcess()), patch.object(main.sys, "stdout", new=fake_stdout):
-            main.convert_file(
+        with patch("subprocess.Popen", return_value=FakeProcess()), patch.object(sys, "stdout", new=fake_stdout):
+            conversion.convert_file(
                 source=Path("movie.mkv"),
                 output=Path("movie-COMPRESSED.mp4"),
                 media=info,
                 audio_position=0,
                 subtitle_position=None,
                 target_height=1080,
-                batch_progress=main.BatchProgressState(total_files=2, completed_files=0, total_seconds=40.0, completed_seconds=0.0),
+                batch_progress=progress.BatchProgressState(total_files=2, completed_files=0, total_seconds=40.0, completed_seconds=0.0),
                 current_file_number=1,
             )
 
@@ -646,14 +650,14 @@ class ConsistencyAndCommandTests(unittest.TestCase):
         self.assertGreaterEqual(len(progress_lines), 3)
 
     def test_convert_file_uses_frame_fallback_when_out_time_is_na(self):
-        info = main.MediaInfo(
+        info = media.MediaInfo(
             path=Path("movie.mkv"),
             format_name="matroska",
             duration_seconds=20.0,
             size_bytes=1,
             width=3840,
             height=2160,
-            audio_streams=[main.MediaStream(1, "audio", "aac", "eng", "Stereo", True)],
+            audio_streams=[media.MediaStream(1, "audio", "aac", "eng", "Stereo", True)],
             subtitle_streams=[],
             frame_rate=20.0,
         )
@@ -684,15 +688,15 @@ class ConsistencyAndCommandTests(unittest.TestCase):
                 return None
 
         renderer = SpyRenderer()
-        with patch("subprocess.Popen", return_value=FakeProcess()), patch("main.time.monotonic", side_effect=[0.0, 0.25, 0.5, 0.75, 1.0]):
-            main.convert_file(
+        with patch("subprocess.Popen", return_value=FakeProcess()), patch("conversion.time.monotonic", side_effect=[0.0, 0.25, 0.5, 0.75, 1.0]):
+            conversion.convert_file(
                 source=Path("movie.mkv"),
                 output=Path("movie-COMPRESSED.mp4"),
                 media=info,
                 audio_position=0,
                 subtitle_position=None,
                 target_height=1080,
-                batch_progress=main.BatchProgressState(total_files=2, completed_files=0, total_seconds=40.0, completed_seconds=0.0),
+                batch_progress=progress.BatchProgressState(total_files=2, completed_files=0, total_seconds=40.0, completed_seconds=0.0),
                 renderer=renderer,
                 current_file_number=1,
             )
@@ -702,14 +706,14 @@ class ConsistencyAndCommandTests(unittest.TestCase):
         self.assertTrue(any("25.0%" in line or " 50.0%" in line for line in renderer.lines))
 
     def test_convert_file_derives_speed_when_ffmpeg_reports_na(self):
-        info = main.MediaInfo(
+        info = media.MediaInfo(
             path=Path("movie.mkv"),
             format_name="matroska",
             duration_seconds=20.0,
             size_bytes=1,
             width=3840,
             height=2160,
-            audio_streams=[main.MediaStream(1, "audio", "aac", "eng", "Stereo", True)],
+            audio_streams=[media.MediaStream(1, "audio", "aac", "eng", "Stereo", True)],
             subtitle_streams=[],
             frame_rate=20.0,
         )
@@ -739,15 +743,15 @@ class ConsistencyAndCommandTests(unittest.TestCase):
                 return None
 
         renderer = SpyRenderer()
-        with patch("subprocess.Popen", return_value=FakeProcess()), patch("main.time.monotonic", side_effect=[0.0, 0.25, 0.5, 0.75, 1.0]):
-            main.convert_file(
+        with patch("subprocess.Popen", return_value=FakeProcess()), patch("conversion.time.monotonic", side_effect=[0.0, 0.25, 0.5, 0.75, 1.0]):
+            conversion.convert_file(
                 source=Path("movie.mkv"),
                 output=Path("movie-COMPRESSED.mp4"),
                 media=info,
                 audio_position=0,
                 subtitle_position=None,
                 target_height=1080,
-                batch_progress=main.BatchProgressState(total_files=2, completed_files=0, total_seconds=40.0, completed_seconds=0.0),
+                batch_progress=progress.BatchProgressState(total_files=2, completed_files=0, total_seconds=40.0, completed_seconds=0.0),
                 renderer=renderer,
                 current_file_number=1,
             )

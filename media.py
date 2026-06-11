@@ -1,3 +1,5 @@
+"""Media metadata parsing, file discovery, and output path helpers."""
+
 from __future__ import annotations
 
 import json
