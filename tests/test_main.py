@@ -85,6 +85,66 @@ class AssetProbeTests(unittest.TestCase):
         self.assertGreaterEqual(info.duration_seconds or 0, 119.0)
         self.assertLessEqual(info.duration_seconds or 0, 121.0)
 
+    def test_folder_summary_can_omit_tracks(self):
+        asset = Path(__file__).with_name("Severance.S01E01.1080.2min.mkv")
+        info = main.probe_media(asset)
+
+        summary = main.format_media_summary(info, include_tracks=False)
+        self.assertIn("File:", summary)
+        self.assertIn("Format:", summary)
+        self.assertNotIn("Audio tracks:", summary)
+        self.assertNotIn("Subtitle tracks:", summary)
+
+    def test_copy_asset_has_reordered_default_tracks(self):
+        asset = Path(__file__).with_name("Severance.S01E01.1080.2min_copy.mkv")
+        self.assertTrue(asset.exists())
+
+        info = main.probe_media(asset)
+        self.assertEqual(info.audio_streams[0].title, "DTS-HD MA 5.1")
+        self.assertEqual(info.subtitle_streams[0].title, "SDH")
+        self.assertTrue(info.audio_streams[0].default)
+        self.assertTrue(info.subtitle_streams[0].default)
+
+    def test_real_assets_resolve_common_tracks_independent_of_order(self):
+        base_asset = Path(__file__).with_name("Severance.S01E01.1080.2min.mkv")
+        copy_asset = Path(__file__).with_name("Severance.S01E01.1080.2min_copy.mkv")
+
+        base = main.probe_media(base_asset)
+        copy = main.probe_media(copy_asset)
+
+        with patch("builtins.input", side_effect=["", "1"]):
+            audio_positions = main.resolve_folder_stream_positions([base, copy], "audio_streams", "audio", consistent=False)
+
+        with patch("builtins.input", side_effect=["", "1"]):
+            subtitle_positions = main.resolve_folder_stream_positions([base, copy], "subtitle_streams", "subtitle", consistent=False, allow_none=True)
+
+        self.assertEqual(audio_positions, [0, 6])
+        self.assertEqual(subtitle_positions, [0, 3])
+
+    def test_per_file_selection_prints_track_list_before_each_prompt(self):
+        base_asset = Path(__file__).with_name("Severance.S01E01.1080.2min.mkv")
+        copy_asset = Path(__file__).with_name("Severance.S01E01.1080.2min_copy.mkv")
+
+        base = main.probe_media(base_asset)
+        copy = main.probe_media(copy_asset)
+
+        fake_stdout = io.StringIO()
+        responses = iter(["2", "1", "2"])
+
+        def fake_input(prompt: str = "") -> str:
+            print(prompt, end="")
+            return next(responses)
+
+        with patch("builtins.input", new=fake_input), patch.object(main.sys, "stdout", new=fake_stdout):
+            positions = main.resolve_folder_stream_positions([base, copy], "subtitle_streams", "subtitle", consistent=False, allow_none=True)
+
+        output = fake_stdout.getvalue()
+        self.assertEqual(positions, [0, 1])
+        self.assertIn("Subtitle tracks for Severance.S01E01.1080.2min.mkv:", output)
+        self.assertIn("Subtitle tracks for Severance.S01E01.1080.2min_copy.mkv:", output)
+        self.assertLess(output.index("Subtitle tracks for Severance.S01E01.1080.2min.mkv:"), output.index("Select default subtitle track for Severance.S01E01.1080.2min.mkv"))
+        self.assertLess(output.index("Subtitle tracks for Severance.S01E01.1080.2min_copy.mkv:"), output.index("Select default subtitle track for Severance.S01E01.1080.2min_copy.mkv"))
+
 
 class ConsistencyAndCommandTests(unittest.TestCase):
     def test_prompt_yes_no_defaults_to_yes_on_blank(self):
@@ -189,7 +249,7 @@ class ConsistencyAndCommandTests(unittest.TestCase):
         self.assertEqual(main.calculate_target_width(large, 1080), 1920)
         self.assertEqual(main.calculate_target_width(large, 720), 1280)
 
-    def test_folder_track_signatures_must_match(self):
+    def test_validate_folder_consistency_reports_audio_and_subtitle_independently(self):
         first = main.MediaInfo(
             path=Path("one.mkv"),
             format_name="matroska",
@@ -207,10 +267,79 @@ class ConsistencyAndCommandTests(unittest.TestCase):
             size_bytes=1,
             width=1920,
             height=1080,
-            audio_streams=[main.MediaStream(1, "audio", "aac", "eng", "Stereo", True)],
+            audio_streams=[main.MediaStream(1, "audio", "ac3", "eng", "Stereo", True)],
             subtitle_streams=[main.MediaStream(2, "subtitle", "subrip", "eng", "English", False)],
         )
-        main.validate_folder_consistency([first, second])
+
+        audio_consistent, subtitle_consistent = main.validate_folder_consistency([first, second])
+        self.assertFalse(audio_consistent)
+        self.assertTrue(subtitle_consistent)
+
+    def test_resolve_folder_stream_positions_can_use_common_tracks(self):
+        first = main.MediaInfo(
+            path=Path("one.mkv"),
+            format_name="matroska",
+            duration_seconds=10.0,
+            size_bytes=1,
+            width=1920,
+            height=1080,
+            audio_streams=[
+                main.MediaStream(1, "audio", "aac", "eng", "Stereo", True),
+                main.MediaStream(2, "audio", "aac", "jpn", "Japanese", False),
+            ],
+            subtitle_streams=[],
+        )
+        second = main.MediaInfo(
+            path=Path("two.mkv"),
+            format_name="matroska",
+            duration_seconds=10.0,
+            size_bytes=1,
+            width=1920,
+            height=1080,
+            audio_streams=[
+                main.MediaStream(2, "audio", "aac", "jpn", "Japanese", False),
+                main.MediaStream(1, "audio", "aac", "eng", "Stereo", True),
+            ],
+            subtitle_streams=[],
+        )
+
+        with patch("builtins.input", side_effect=["", "1"]):
+            positions = main.resolve_folder_stream_positions([first, second], "audio_streams", "audio", consistent=False)
+
+        self.assertEqual(positions, [0, 1])
+
+    def test_resolve_folder_stream_positions_can_select_each_file_separately(self):
+        first = main.MediaInfo(
+            path=Path("one.mkv"),
+            format_name="matroska",
+            duration_seconds=10.0,
+            size_bytes=1,
+            width=1920,
+            height=1080,
+            audio_streams=[],
+            subtitle_streams=[
+                main.MediaStream(1, "subtitle", "subrip", "eng", "English", False),
+                main.MediaStream(2, "subtitle", "subrip", "jpn", "Japanese", False),
+            ],
+        )
+        second = main.MediaInfo(
+            path=Path("two.mkv"),
+            format_name="matroska",
+            duration_seconds=10.0,
+            size_bytes=1,
+            width=1920,
+            height=1080,
+            audio_streams=[],
+            subtitle_streams=[
+                main.MediaStream(2, "subtitle", "subrip", "jpn", "Japanese", False),
+                main.MediaStream(1, "subtitle", "subrip", "eng", "English", False),
+            ],
+        )
+
+        with patch("builtins.input", side_effect=["2", "2", "1"]):
+            positions = main.resolve_folder_stream_positions([first, second], "subtitle_streams", "subtitle", consistent=False, allow_none=True)
+
+        self.assertEqual(positions, [1, 0])
 
     def test_build_ffmpeg_command_sets_scale_and_default_tracks(self):
         info = main.MediaInfo(
@@ -265,6 +394,31 @@ class ConsistencyAndCommandTests(unittest.TestCase):
         )
 
         self.assertNotIn("-vf", command)
+
+    def test_build_ffmpeg_command_uses_copy_when_source_is_already_low_res_and_streams_are_compatible(self):
+        info = main.MediaInfo(
+            path=Path("movie.mkv"),
+            format_name="matroska",
+            duration_seconds=30.0,
+            size_bytes=1,
+            width=1280,
+            height=720,
+            audio_streams=[main.MediaStream(1, "audio", "aac", "eng", "Stereo", True)],
+            subtitle_streams=[main.MediaStream(2, "subtitle", "subrip", "eng", "English", False)],
+        )
+        command = main.build_ffmpeg_command(
+            source=Path("movie.mkv"),
+            output=Path("movie-COMPRESSED.mp4"),
+            media=info,
+            default_audio_position=0,
+            default_subtitle_position=0,
+            target_height=1080,
+        )
+
+        joined = " ".join(command)
+        self.assertIn("-c:v copy", joined)
+        self.assertIn("-c:a copy", joined)
+        self.assertNotIn("-vf", joined)
 
     def test_build_ffmpeg_command_uses_custom_target_height(self):
         info = main.MediaInfo(
