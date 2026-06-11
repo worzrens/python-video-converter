@@ -1,13 +1,16 @@
 import io
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import conversion
+import main
 import media
 import progress
 import tracks
@@ -58,6 +61,7 @@ class ProbeMediaTests(unittest.TestCase):
         run.assert_called_once()
 
 
+
 class PathAndNamingTests(unittest.TestCase):
     def test_output_path_for_single_file_uses_resolution_suffix(self):
         result = media.build_output_path(
@@ -79,6 +83,13 @@ class PathAndNamingTests(unittest.TestCase):
 
 
 class AssetProbeTests(unittest.TestCase):
+    def _copy_asset(self) -> Path:
+        asset = Path(__file__).with_name("Severance.S01E01.1080.2min_copy.mkv")
+        self.assertTrue(asset.exists())
+        if asset.stat().st_size == 0:
+            self.skipTest("copy fixture is empty in this checkout")
+        return asset
+
     def test_two_minute_cut_asset_can_be_probed(self):
         asset = Path(__file__).with_name("Severance.S01E01.1080.2min.mkv")
         self.assertTrue(asset.exists())
@@ -100,8 +111,7 @@ class AssetProbeTests(unittest.TestCase):
         self.assertNotIn("Subtitle tracks:", summary)
 
     def test_copy_asset_has_reordered_default_tracks(self):
-        asset = Path(__file__).with_name("Severance.S01E01.1080.2min_copy.mkv")
-        self.assertTrue(asset.exists())
+        asset = self._copy_asset()
 
         info = media.probe_media(asset)
         self.assertEqual(info.audio_streams[0].title, "DTS-HD MA 5.1")
@@ -111,7 +121,7 @@ class AssetProbeTests(unittest.TestCase):
 
     def test_real_assets_resolve_common_tracks_independent_of_order(self):
         base_asset = Path(__file__).with_name("Severance.S01E01.1080.2min.mkv")
-        copy_asset = Path(__file__).with_name("Severance.S01E01.1080.2min_copy.mkv")
+        copy_asset = self._copy_asset()
 
         base = media.probe_media(base_asset)
         copy = media.probe_media(copy_asset)
@@ -127,7 +137,7 @@ class AssetProbeTests(unittest.TestCase):
 
     def test_per_file_selection_prints_track_list_before_each_prompt(self):
         base_asset = Path(__file__).with_name("Severance.S01E01.1080.2min.mkv")
-        copy_asset = Path(__file__).with_name("Severance.S01E01.1080.2min_copy.mkv")
+        copy_asset = self._copy_asset()
 
         base = media.probe_media(base_asset)
         copy = media.probe_media(copy_asset)
@@ -757,6 +767,63 @@ class ConsistencyAndCommandTests(unittest.TestCase):
             )
 
         self.assertTrue(any("speed unknown" not in line for line in renderer.lines))
+
+
+class MainFlowTests(unittest.TestCase):
+    def test_main_exits_when_cli_dependencies_missing(self):
+        with patch("main.shutil.which", return_value=None):
+            self.assertEqual(main.main(), 1)
+
+    def test_main_orchestrates_happy_path(self):
+        media_info = SimpleNamespace(
+            path=Path("/tmp/movie.mkv"),
+            duration_seconds=12.5,
+            audio_streams=[],
+            subtitle_streams=[],
+        )
+        batch_progress = SimpleNamespace(
+            total_files=1,
+            total_seconds=12.5,
+            completed_files=0,
+            completed_seconds=0.0,
+        )
+
+        with patch("main._ensure_cli_dependencies", return_value=True), patch(
+            "main._prompt_input_path", return_value=Path("/tmp/movie.mkv")
+        ), patch("main.discover_targets", return_value=([Path("/tmp/movie.mkv")], False, None)), patch(
+            "main.probe_media", return_value=media_info
+        ) as probe_media, patch("main._print_media_overview", return_value=(True, True)) as print_overview, patch(
+            "main.prompt_target_height", return_value=720
+        ) as prompt_height, patch("main._prepare_batch_progress", return_value=batch_progress) as prepare_progress, patch(
+            "main._select_stream_positions", return_value=(None, None, 0, None)
+        ) as select_positions, patch("main.ProgressRenderer") as renderer_cls, patch(
+            "main.prompt_yes_no", return_value=True
+        ) as prompt_yes_no, patch("main._run_conversion_batch") as run_batch:
+            renderer = renderer_cls.return_value
+            renderer.interactive = True
+            self.assertEqual(main.main(), 0)
+
+        probe_media.assert_called_once_with(Path("/tmp/movie.mkv"))
+        print_overview.assert_called_once_with([media_info], False)
+        prompt_height.assert_called_once_with()
+        prepare_progress.assert_called_once_with([media_info])
+        select_positions.assert_called_once_with([media_info], False, True, True)
+        prompt_yes_no.assert_called_once_with("Proceed with conversion?", default=True)
+        renderer.render.assert_called_once()
+        run_batch.assert_called_once()
+
+
+
+class RepositoryPolicyTests(unittest.TestCase):
+    def test_no_tracked_media_files(self):
+        result = subprocess.run(
+            ["git", "ls-files", "--", "*.mp4", "*.mkv"],
+            cwd=Path(__file__).resolve().parents[1],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.stdout.strip(), "")
 
 
 if __name__ == "__main__":
