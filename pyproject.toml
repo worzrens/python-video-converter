@@ -7,3 +7,4 @@ dependencies = []
 
 [project.scripts]
 ffmpeg-converter = "main:main"
+kb-search = "knowledge_base.tools.search:main"

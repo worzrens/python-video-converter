@@ -16,3 +16,7 @@ tests-COMPRESSED/
 *.wmv
 
 .DS_Store
+
+# knowledge_base: raw ingested source is personal scratch, kept local only.
+# Compiled wiki/ and outputs/ (the shareable value) stay tracked.
+knowledge_base/raw/
